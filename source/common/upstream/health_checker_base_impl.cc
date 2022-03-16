@@ -160,6 +160,14 @@ HealthCheckerImplBase::intervalWithJitter(uint64_t base_time_ms,
 
 void HealthCheckerImplBase::addHosts(const HostVector& hosts) {
   for (const HostSharedPtr& host : hosts) {
+    // Defend against creating a session for the same host twice. This happens
+    // if start() is called after onClusterMemberUpdate() has already been
+    // invoked. start() will be delayed in this fashion for instance if health
+    // checks don't begin until secrets necessary for health check connections
+    // have been loaded from SDS.
+    if (active_sessions_[host] != nullptr) {
+      continue;
+    }
     active_sessions_[host] = makeSession(host);
     host->setHealthChecker(
         HealthCheckHostMonitorPtr{new HealthCheckHostMonitorImpl(shared_from_this(), host)});
@@ -172,7 +180,10 @@ void HealthCheckerImplBase::onClusterMemberUpdate(const HostVector& hosts_added,
   addHosts(hosts_added);
   for (const HostSharedPtr& host : hosts_removed) {
     auto session_iter = active_sessions_.find(host);
-    ASSERT(active_sessions_.end() != session_iter);
+    if (session_iter == active_sessions_.end()) {
+      // As start is now called later on, a membership update can be received prior to the host having been added to the list
+      continue
+    }
     // This deletion can happen inline in response to a host failure, so we deferred delete.
     session_iter->second->onDeferredDeleteBase();
     dispatcher_.deferredDelete(std::move(session_iter->second));
